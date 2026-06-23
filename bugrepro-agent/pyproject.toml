@@ -1,5 +1,5 @@
 [project]
-name = "patchguard-agent"
+name = "bugrepro-agent"
 version = "0.1.0"
 description = ""
 authors = [
