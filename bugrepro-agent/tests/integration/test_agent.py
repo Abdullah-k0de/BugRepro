@@ -17,7 +17,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from app.agent import root_agent
+from app.agent import app
 
 
 def test_agent_stream() -> None:
@@ -28,22 +28,56 @@ def test_agent_stream() -> None:
 
     session_service = InMemorySessionService()
 
-    session = session_service.create_session_sync(user_id="test_user", app_name="test")
-    runner = Runner(agent=root_agent, session_service=session_service, app_name="test")
+    session = session_service.create_session_sync(user_id="test_user", app_name=app.name)
+    runner = Runner(app=app, session_service=session_service)
+
+    from unittest.mock import patch, MagicMock
+    
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "title": "[BUG]: before_tool callback's lowercase_value() silently does nothing",
+        "body": "The lowercase_value() function in customer_service/shared_libraries/callbacks.py (lines 96-106) contains two independent defects. Additionally, its only call site in before_tool() (line 113) discards the return value, making the intended lowercasing behavior ineffective.",
+    }
 
     message = types.Content(
-        role="user", parts=[types.Part.from_text(text="Why is the sky blue?")]
+        role="user", parts=[types.Part.from_text(text="Please triage and fix this issue: https://github.com/google/adk-samples/issues/2081")]
     )
 
-    events = list(
-        runner.run(
-            new_message=message,
+    try:
+        with patch("httpx.get", return_value=mock_response):
+            events = list(
+                runner.run(
+                    new_message=message,
+                    user_id="test_user",
+                    session_id=session.id,
+                    run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+                )
+            )
+        assert len(events) > 0, "Expected at least one message"
+    finally:
+        session_updated = session_service.get_session_sync(
+            app_name=app.name,
             user_id="test_user",
-            session_id=session.id,
-            run_config=RunConfig(streaming_mode=StreamingMode.SSE),
+            session_id=session.id
         )
-    )
-    assert len(events) > 0, "Expected at least one message"
+        # 1. Clean up from the global registry
+        from app.tools import _ACTIVE_SANDBOXES
+        sandbox_id = session_updated.state.get("sandbox_id")
+        if sandbox_id:
+            sandbox = _ACTIVE_SANDBOXES.pop(sandbox_id, None)
+            if sandbox:
+                try:
+                    sandbox.stop()
+                except Exception:
+                    pass
+        # 2. Fallback to legacy sandbox key
+        sandbox = session_updated.state.get("sandbox")
+        if sandbox:
+            try:
+                sandbox.stop()
+            except Exception:
+                pass
 
     has_text_content = False
     for event in events:

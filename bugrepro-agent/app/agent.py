@@ -1,4 +1,3 @@
-# ruff: noqa
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,67 +12,322 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import datetime
-from zoneinfo import ZoneInfo
-
-from google.adk.agents import Agent
-from google.adk.apps import App
-from google.adk.models import Gemini
-from google.genai import types
-
 import os
+import logging
 import google.auth
+from google.adk.agents import Agent, SequentialAgent
+from google.adk.agents.callback_context import CallbackContext
+from google.adk.apps import App
+from google.adk.workflow import Workflow, START, node
+from google.adk.events.event import Event
+from google.adk.agents.context import Context
+from typing import Any
+from google.adk.models import Gemini
+from google.genai import types as genai_types
+from google.adk.plugins.logging_plugin import LoggingPlugin
+from google.adk.plugins.debug_logging_plugin import DebugLoggingPlugin
 
+# Configure standard Python logging for console visibility
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
+import sys
+if sys.platform.startswith("win"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except AttributeError:
+        pass
+
+from app.tools import (
+    fetch_github_issue,
+    clone_and_setup_repo,
+    run_sandbox_command,
+    read_sandbox_file,
+    write_sandbox_file,
+    patch_file_content,
+    save_triage_decision,
+    save_reproduction_results,
+    save_patch_results,
+    save_verification_results,
+)
+
+# GCP authentication setup for Vertex AI
 _, project_id = google.auth.default()
 os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 
+# Common LLM configuration
+model_name = "gemini-2.5-flash"
+cfg = genai_types.GenerateContentConfig(temperature=0.1)
 
-def get_weather(query: str) -> str:
-    """Simulates a web search. Use it get information on weather.
-
-    Args:
-        query: A string containing the location to get weather information for.
-
-    Returns:
-        A string with the simulated weather information for the queried location.
-    """
-    if "sf" in query.lower() or "san francisco" in query.lower():
-        return "It's 60 degrees and foggy."
-    return "It's 90 degrees and sunny."
-
-
-def get_current_time(query: str) -> str:
-    """Simulates getting the current time for a city.
-
-    Args:
-        city: The name of the city to get the current time for.
-
-    Returns:
-        A string with the current time information.
-    """
-    if "sf" in query.lower() or "san francisco" in query.lower():
-        tz_identifier = "America/Los_Angeles"
-    else:
-        return f"Sorry, I don't have timezone information for query: {query}."
-
-    tz = ZoneInfo(tz_identifier)
-    now = datetime.datetime.now(tz)
-    return f"The current time for query {query} is {now.strftime('%Y-%m-%d %H:%M:%S %Z%z')}"
-
-
-root_agent = Agent(
-    name="root_agent",
-    model=Gemini(
-        model="gemini-flash-latest",
-        retry_options=types.HttpRetryOptions(attempts=3),
+# 1. Issue Triage Agent
+issue_triage_agent = Agent(
+    name="issue_triage_agent",
+    model=Gemini(model=model_name),
+    generate_content_config=cfg,
+    instruction=(
+        "You are the Issue Triage Agent.\n"
+        "Your task is to analyze the GitHub issue URL provided in the user's message.\n"
+        "1. Call the `fetch_github_issue` tool using the user's provided issue URL.\n"
+        "2. Examine the retrieved issue title and body. Decide if this issue is automatically fixable.\n"
+        "   To be automatically fixable (FIXABLE), the issue must meet the following MVP criteria:\n"
+        "   - The repo must be a Python project.\n"
+        "   - There must be a clear bug description or steps to reproduce.\n"
+        "   - It must not require a database, complex external APIs, private keys, or browser/UI interaction.\n"
+        "3. Call the `save_triage_decision` tool with your decision (True if FIXABLE, False otherwise) and a detailed reason.\n"
+        "Finally, summarize your decision and explanation to the user."
     ),
-    instruction="You are a helpful AI assistant designed to provide accurate and useful information.",
-    tools=[get_weather, get_current_time],
+    tools=[fetch_github_issue, save_triage_decision],
 )
 
+# 2. Repo Setup Agent
+repo_setup_agent = Agent(
+    name="repo_setup_agent",
+    model=Gemini(model=model_name),
+    generate_content_config=cfg,
+    instruction=(
+        "You are the Repo Setup Agent.\n"
+        "Your task is to set up the repository inside the isolated Docker sandbox environment.\n"
+        "1. Check the triage status in the session state. If 'triage_status' is 'NOT_FIXABLE', stop immediately and explain that setup is skipped.\n"
+        "2. If the status is 'FIXABLE', read the 'repo_url' from the state, and call the `clone_and_setup_repo` tool to clone the repository and install dependencies.\n"
+        "Report the setup status and the results of dependency installation to the user."
+    ),
+    tools=[clone_and_setup_repo],
+)
+
+# Shared Sandbox tools list to ensure all sandbox-facing agents have necessary capabilities
+sandbox_tools = [
+    run_sandbox_command,
+    read_sandbox_file,
+    write_sandbox_file,
+    patch_file_content,
+]
+
+# 3. Reproduction Agent
+reproduction_agent = Agent(
+    name="reproduction_agent",
+    model=Gemini(model=model_name),
+    generate_content_config=cfg,
+    instruction=(
+        "You are the Reproduction Agent.\n"
+        "Your task is to reproduce the reported bug inside the Docker sandbox.\n"
+        "1. Check the triage status in the input or state. If 'triage_status' is 'NOT_FIXABLE', stop immediately.\n"
+        "2. Read the issue details from the input. Write a reproduction test file (e.g. `tests/test_repro.py` or a script) using `write_sandbox_file` to trigger the bug.\n"
+        "   IMPORTANT: The reproduction test should assert the CORRECT, EXPECTED behavior of the code. This means "
+        "   the test MUST FAIL when the bug is present, and PASS only after the bug is fixed. Do not catch "
+        "   or assert expected TypeErrors or failures in a way that makes the test pass when the bug is present. "
+        "   Instead, write assertions for the correct expected output so the test fails on the unmodified codebase.\n"
+        "3. Run the test file using `run_sandbox_command` (e.g. `['pytest', 'python/agents/customer-service/tests/unit/test_callbacks.py']`).\n"
+        "4. Verify that you observe the expected assertion failure or crash (proving reproduction succeeded).\n"
+        "5. Call `save_reproduction_results` with: \n"
+        "   - `reproduced`: True if the bug was successfully reproduced with a failing test / error, False otherwise.\n"
+        "   - `failure_logs`: The test stdout/stderr showing the bug crash.\n"
+        "   - `test_file_path`: The path of the reproduction test file you created or ran.\n"
+        "Explain your findings and the test run results to the user."
+    ),
+    tools=sandbox_tools + [save_reproduction_results],
+)
+
+# 4. Patch Agent
+patch_agent = Agent(
+    name="patch_agent",
+    model=Gemini(model=model_name),
+    generate_content_config=cfg,
+    instruction=(
+        "You are the Patch Agent.\n"
+        "Your task is to apply a minimal code change to fix the reproduced bug.\n"
+        "1. Check the triage status and reproduction status in the input. If triage is 'NOT_FIXABLE' or reproduction is 'NOT_REPRODUCED', stop immediately.\n"
+        "2. Review the previous failed attempts in the input if they exist. Propose a completely different, corrected fixing strategy; DO NOT repeat the same failed patches.\n"
+        "3. Locate the source file containing the bug (e.g. `customer_service/shared_libraries/callbacks.py` as indicated in the issue description), read it using `read_sandbox_file`.\n"
+        "4. Apply a minimal, precise code change to fix the bug using the `patch_file_content` tool.\n"
+        "5. Call the `save_patch_results` tool with:\n"
+        "   - `patched`: True if the patch was applied, False otherwise.\n"
+        "   - `patch_details`: A description of the changes made and the file path.\n"
+        "Explain the applied patch to the user, highlighting how it differs from any previous failed attempts."
+    ),
+    tools=sandbox_tools + [save_patch_results],
+)
+
+# 5. Verification Agent
+verification_agent = Agent(
+    name="verification_agent",
+    model=Gemini(model=model_name),
+    generate_content_config=cfg,
+    instruction=(
+        "You are the Verification Agent.\n"
+        "Your task is to verify that the patch fixed the bug and compile the final report.\n"
+        "1. If 'triage_status' in the input or state is 'NOT_FIXABLE', output the final report showing that the issue is out of scope and call `save_verification_results` with passed=False and logs='Out of scope'.\n"
+        "2. If 'reproduction_status' in the input or state is 'NOT_REPRODUCED', output that the bug could not be reproduced and call `save_verification_results` with passed=False and logs='Could not reproduce'.\n"
+        "3. If 'patch_status' in the input or state is 'PATCHED':\n"
+        "   - Run ONLY the specific reproduction test that was created (e.g., `['pytest', 'python/agents/customer-service/tests/unit/test_callbacks.py']`) using `run_sandbox_command`. DO NOT run a plain `pytest` command at the repository root, as this will collect tests from other directories and fail due to missing dependencies.\n"
+        "   - Run `run_sandbox_command` with argument `['git', 'diff']` to obtain the actual unified git diff inside the sandbox.\n"
+        "   - Check if the tests passed. Call `save_verification_results` with `passed=True` (if the reproduction test passes) or `passed=False` (if it fails), and pass the full stdout/stderr of the test run as the `logs` argument.\n"
+        "4. Output the final 'BugRepro Sentinel Result' showing:\n"
+        "   - Issue Details (URL, Title)\n"
+        "   - Reproducibility status (Reproduced / Could not reproduce)\n"
+        "   - Patch Applied (file changes, diff description, and the raw unified git diff output block from git diff)\n"
+        "   - Verification status (Passed / Failed)\n"
+        "   - Test summary (Before: failed tests vs After: passed tests)\n"
+        "Present this final summary report clearly in your response."
+    ),
+    tools=sandbox_tools + [save_verification_results],
+)
+
+from google.adk.plugins.base_plugin import BasePlugin
+
+class SandboxCleanupPlugin(BasePlugin):
+    """Ensures the sandbox Docker container is stopped and removed, even on errors."""
+    def __init__(self):
+        super().__init__(name="sandbox_cleanup")
+
+    async def after_run_callback(self, **kwargs) -> None:
+        ctx = kwargs.get("callback_context") or kwargs.get("invocation_context")
+        if ctx:
+            state = getattr(ctx, "state", None) or getattr(getattr(ctx, "session", None), "state", None)
+            if state:
+                # 1. Stop sandbox using sandbox_id
+                sandbox_id = state.get("sandbox_id")
+                if sandbox_id:
+                    from app.tools import _ACTIVE_SANDBOXES
+                    sandbox = _ACTIVE_SANDBOXES.pop(sandbox_id, None)
+                    if sandbox:
+                        try:
+                            sandbox.stop()
+                        except Exception:
+                            pass
+                    state["sandbox_id"] = None
+                
+                # 2. Fallback to legacy sandbox key
+                sandbox = state.get("sandbox")
+                if sandbox:
+                    try:
+                        sandbox.stop()
+                    except Exception:
+                        pass
+                    state["sandbox"] = None
+
+    async def close(self) -> None:
+        """Called when the Runner closes. Stop all active sandboxes."""
+        from app.tools import _ACTIVE_SANDBOXES
+        if _ACTIVE_SANDBOXES:
+            for sandbox_id, sandbox in list(_ACTIVE_SANDBOXES.items()):
+                try:
+                    sandbox.stop()
+                except Exception:
+                    pass
+            _ACTIVE_SANDBOXES.clear()
+
+@node(rerun_on_resume=True)
+async def run_sentinel(ctx: Context, node_input: Any) -> Any:
+    # 1. Run Issue Triage Agent
+    triage_res = await ctx.run_node(issue_triage_agent, node_input=node_input)
+    
+    triage_status = ctx.state.get("triage_status")
+    if triage_status != "FIXABLE":
+        # Out of scope: compile final report
+        verify_input = f"Issue URL: {ctx.state.get('issue_url')}\nIssue Title: {ctx.state.get('issue_title')}\nTriage Status: {triage_status}\nTriage Reason: {ctx.state.get('triage_reason')}\n\nTriage Agent Response:\n{triage_res}"
+        return await ctx.run_node(verification_agent, node_input=verify_input)
+        
+    # 2. Run Repo Setup Agent
+    repo_url = ctx.state.get("repo_url")
+    setup_input = f"Triage Status: {triage_status}\nTriage Reason: {ctx.state.get('triage_reason')}\nRepository URL: {repo_url}"
+    setup_res = await ctx.run_node(repo_setup_agent, node_input=setup_input)
+    
+    # 3. Run Reproduction Agent
+    issue_body = ctx.state.get("issue_body", "")
+    repro_input = f"Triage Status: {triage_status}\nRepository setup result: {setup_res}\nIssue URL: {ctx.state.get('issue_url')}\nIssue Title: {ctx.state.get('issue_title')}\nIssue Description:\n{issue_body}"
+    repro_res = await ctx.run_node(reproduction_agent, node_input=repro_input)
+    
+    reproduction_status = ctx.state.get("reproduction_status")
+    if reproduction_status != "REPRODUCED":
+        # Reproduction failed: compile final report
+        verify_input = f"Issue URL: {ctx.state.get('issue_url')}\nIssue Title: {ctx.state.get('issue_title')}\nTriage Status: {triage_status}\nReproduction Status: {reproduction_status}\nReproduction Logs:\n{ctx.state.get('reproduction_logs')}\n\nReproduction Agent Response:\n{repro_res}"
+        return await ctx.run_node(verification_agent, node_input=verify_input)
+
+    # 4. Patch & Verification Loop (up to 3 attempts)
+    attempts = 1
+    ctx.state["patch_attempts"] = attempts
+    
+    issue_title = ctx.state.get("issue_title", "")
+    patch_input = (
+        f"Triage Status: {triage_status}\n"
+        f"Reproduction Status: {reproduction_status}\n"
+        f"Reproduction Test File: {ctx.state.get('reproduction_test_file')}\n"
+        f"Reproduction Logs:\n{ctx.state.get('reproduction_logs')}\n\n"
+        f"Issue URL: {ctx.state.get('issue_url')}\n"
+        f"Issue Title: {issue_title}\n"
+        f"Issue Description:\n{issue_body}\n\n"
+        f"Reproduction Summary:\n{repro_res}\n\n"
+        f"Please identify the issue in the repository files, read the relevant file, and apply a minimal, precise patch to fix it."
+    )
+    
+    verify_res = None
+    while attempts <= 3:
+        # Run Patch Agent
+        patch_res = await ctx.run_node(patch_agent, node_input=patch_input)
+        
+        # Run Verification Agent
+        verify_input = (
+            f"Issue URL: {ctx.state.get('issue_url')}\n"
+            f"Issue Title: {issue_title}\n"
+            f"Triage Status: {triage_status}\n"
+            f"Reproduction Status: {reproduction_status}\n"
+            f"Patch Status: {ctx.state.get('patch_status')}\n"
+            f"Patch Details: {ctx.state.get('patch_details')}\n"
+            f"Reproduction Test File: {ctx.state.get('reproduction_test_file')}\n\n"
+            f"Patch Agent Response:\n{patch_res}"
+        )
+        verify_res = await ctx.run_node(verification_agent, node_input=verify_input)
+        
+        verification_status = ctx.state.get("verification_status")
+        if verification_status == "PASSED" or attempts >= 3:
+            break
+            
+        # Prepare context for next attempt
+        attempts += 1
+        ctx.state["patch_attempts"] = attempts
+        
+        failed_logs = ctx.state.get("verification_logs", "")
+        failed_patch = ctx.state.get("patch_details", "")
+        patch_history_str = ""
+        patch_history = ctx.state.get("patch_history", [])
+        if patch_history:
+            patch_history_str = "\nPrevious Failed Attempts:\n" + "\n".join(
+                f"Attempt {i+1}:\nPatch Details: {h['patch_details']}\nVerification Logs: {h['verification_logs']}\n"
+                for i, h in enumerate(patch_history)
+            )
+        patch_input = (
+            f"Verification failed on attempt {attempts - 1}!\n"
+            f"Here is the failed patch details:\n{failed_patch}\n\n"
+            f"Here is the test failure logs:\n{failed_logs}\n\n"
+            f"Issue URL: {ctx.state.get('issue_url')}\n"
+            f"Issue Title: {issue_title}\n"
+            f"Issue Description:\n{issue_body}\n"
+            f"{patch_history_str}\n"
+            f"Please analyze these failures and apply a different patch. Propose a completely different fixing strategy and do NOT repeat the same failed patches."
+        )
+        
+    return verify_res
+
+# Root coordinator orchestrator
+root_agent = Workflow(
+    name="root_agent",
+    edges=[
+        (START, run_sentinel),
+    ]
+)
+
+# App interface definition
 app = App(
     root_agent=root_agent,
     name="app",
+    plugins=[
+        SandboxCleanupPlugin(),
+        LoggingPlugin(),
+        DebugLoggingPlugin(output_path="adk_debug.yaml"),
+    ],
 )
