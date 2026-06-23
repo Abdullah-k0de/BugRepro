@@ -188,6 +188,7 @@ Thumbs.db
 
 # ADK
 .adk/
+adk_debug.yaml
 
 # Agent CLI specific
 .persist_vector_store
