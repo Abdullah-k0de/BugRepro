@@ -10,11 +10,11 @@ All operations (cloning, dependency installation, running command lines, writing
 
 1. **Stage 1 (Current)**: Core BugRepro Sentinel Agents, Sandbox Tools, and CLI runner.
    * **Step 1**: Project Setup & Scaffolding `[COMPLETED]`
-   * **Step 2**: Sandbox Engine Development (`sandbox.py`) `[PENDING]`
-   * **Step 3**: Core Tools Implementation (`tools.py`) `[PENDING]`
-   * **Step 4**: Agent Graph Orchestration (`agent.py`) `[PENDING]`
-   * **Step 5**: Live Demo Verification `[PENDING]`
-2. **Stage 2**: Web Frontend & Backend API Server (FastAPI hosting the ADK runner).
+   * **Step 2**: Sandbox Engine Development (`sandbox.py`) `[COMPLETED]`
+   * **Step 3**: Core Tools Implementation (`tools.py`) `[COMPLETED]`
+   * **Step 4**: Agent Graph Orchestration (`agent.py`) `[COMPLETED]`
+   * **Step 5**: Demo Verification `[COMPLETED]` (Validating against issue #2081)
+2. **Stage 2**: Web Frontend & Backend API Server (FastAPI hosting the ADK runner).`[PENDING]`
 3. **Stage 3**: Cloud Deployment (Deploying Backend & Frontend to Cloud).
 4. **Stage 4**: Multi-repo & Node.js Support.
 
@@ -49,6 +49,7 @@ graph TD
 ## 🔒 Security Boundary Policy
 
 To prevent arbitrary code execution (like malicious pre/post-install hooks or test scripts) from affecting the developer's machine:
+
 * **Zero Host Mounts**: No folders on the host are mounted to the container. Git clones, builds, and test runs are kept strictly inside the container's isolated virtual filesystem.
 * **Blank Environments**: Host-level environment variables (including Google API keys and GitHub tokens) are never leaked to the sandbox container.
 * **Command Sanitization**: Execution commands are passed as strict argument lists (e.g. `["pip", "install", "-r", "requirements.txt"]`) bypassing shell expansion. String commands are checked programmatically to block chaining (`&&`, `;`, `|`).
@@ -56,24 +57,27 @@ To prevent arbitrary code execution (like malicious pre/post-install hooks or te
 
 ---
 
-## 📦 Current Status: Step 1 (Scaffolding & Setup)
-* Boilerplate generated via `agents-cli scaffold` under `bugrepro-agent/`.
-* Dependency configurations defined in `pyproject.toml` including:
-  * `google-adk[gcp]`
-  * `docker` (Python SDK for container management)
-  * `httpx` (HTTP client for querying OSV)
+## 📦 Current Status: Step 4 (Agent Graph Orchestration)
+
+* **Step 1 (Scaffolding & Setup)** `[COMPLETED]`: Scaffolded ADK project under `bugrepro-agent/`.
+* **Step 2 (Sandbox Engine)** `[COMPLETED]`: Developed isolated `DockerSandbox` in `sandbox.py` and passed lifecycle tests.
+* **Step 3 (Core Tools)** `[COMPLETED]`: Developed custom tools in `tools.py` for issue fetching, sandbox execution, reading/writing, and patching files, passing unit tests.
+* **Step 4 (Agent Orchestration)** `[COMPLETED]`: Configured a 5-agent sequential orchestration (`SequentialAgent` in `agent.py`) using Triage, Setup, Reproduction, Patch, and Verification specialist agents with automatic sandbox cleanup.
+* **Step 5 (Validation Target)** `[PENDING]`: Ready for End-to-End verification targeting GitHub issue [#2081](https://github.com/google/adk-samples/issues/2081) (TypeError/ignoring return value in `before_tool` callback's lowercasing helper).
 * Virtual environment synchronized via `uv sync`.
 
 ---
 
 ## 🛠️ Local Development (Stage 1)
 
-### Prerequisites
+Prerequisites
+
 * Python 3.11+
 * Docker running on the host system
 * `uv` installed (`pip install uv`)
 
 ### Setup
+
 1. Clone this repository.
 2. Synchronize dependencies:
    ```bash
