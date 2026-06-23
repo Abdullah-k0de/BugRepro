@@ -34,8 +34,10 @@ def test_fetch_github_issue_success():
         "body": "The parser crashes when --file option is omitted.",
     }
     
+    tool_context = MagicMock(spec=ToolContext)
+    tool_context.state = {}
     with patch("httpx.get", return_value=mock_response):
-        res = fetch_github_issue("https://github.com/google/adk-samples/issues/2081")
+        res = fetch_github_issue("https://github.com/google/adk-samples/issues/2081", tool_context)
         assert res["status"] == "success"
         assert res["owner"] == "google"
         assert res["repo"] == "adk-samples"
@@ -45,7 +47,8 @@ def test_fetch_github_issue_success():
 
 
 def test_fetch_github_issue_invalid_url():
-    res = fetch_github_issue("https://invalid-url.com/issues/123")
+    tool_context = MagicMock(spec=ToolContext)
+    res = fetch_github_issue("https://invalid-url.com/issues/123", tool_context)
     assert res["status"] == "error"
     assert "Invalid GitHub issue URL" in res["message"]
 
@@ -58,7 +61,7 @@ def test_sandbox_tools_integration():
     try:
         # Create a mock ToolContext
         tool_context = MagicMock(spec=ToolContext)
-        tool_context.state = {"temp:sandbox": sandbox}
+        tool_context.state = {"sandbox": sandbox}
         
         # Test write file
         filepath = "test_file.py"
@@ -86,10 +89,50 @@ def test_sandbox_tools_integration():
         assert "print('hello')" not in read_patched["content"]
         
         # Test run command
-        cmd_res = run_sandbox_command(["python", f"/workspace/{filepath}"], tool_context)
+        cmd_res = run_sandbox_command(["python", filepath], tool_context)
         assert cmd_res["status"] == "success"
         assert cmd_res["exit_code"] == 0
         assert "world" in cmd_res["stdout"]
         
     finally:
         sandbox.stop()
+
+
+def test_command_sanitization():
+    tool_context = MagicMock(spec=ToolContext)
+    tool_context.state = {}
+    
+    # Valid command list
+    res = run_sandbox_command(["pip", "install", "-r", "requirements.txt"], tool_context)
+    # Fails because no sandbox is active, but doesn't fail validation
+    assert res["status"] == "error"
+    assert "No active sandbox" in res["message"]
+    
+    # Invalid command list (chaining)
+    res_chain = run_sandbox_command(["sh", "-c", "echo hello && rm -rf /"], tool_context)
+    assert res_chain["status"] == "error"
+    assert "Command validation failed" in res_chain["message"]
+    assert "chaining" in res_chain["message"]
+
+
+def test_path_validation():
+    tool_context = MagicMock(spec=ToolContext)
+    tool_context.state = {}
+    
+    # Invalid paths (traversal)
+    res = write_sandbox_file("../etc/passwd", "malicious", tool_context)
+    assert res["status"] == "error"
+    assert "Path validation failed" in res["message"]
+    assert "Path traversal" in res["message"]
+    
+    # Invalid paths (absolute)
+    res = read_sandbox_file("/etc/passwd", tool_context)
+    assert res["status"] == "error"
+    assert "Path validation failed" in res["message"]
+    assert "Absolute paths are not allowed" in res["message"]
+    
+    # Invalid file type/extension (shell script)
+    res = write_sandbox_file("run.sh", "echo hello", tool_context)
+    assert res["status"] == "error"
+    assert "Path validation failed" in res["message"]
+    assert "File type/extension not allowed" in res["message"]
