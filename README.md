@@ -8,13 +8,18 @@ All operations (cloning, dependency installation, running command lines, writing
 
 ## 🚀 Multi-Stage Roadmap
 
-1. **Stage 1 (Current)**: Core BugRepro Sentinel Agents, Sandbox Tools, and CLI runner.
+1. **Stage 1 (Completed)**: Core BugRepro Sentinel Agents, Sandbox Tools, and CLI runner.
    * **Step 1**: Project Setup & Scaffolding `[COMPLETED]`
    * **Step 2**: Sandbox Engine Development (`sandbox.py`) `[COMPLETED]`
    * **Step 3**: Core Tools Implementation (`tools.py`) `[COMPLETED]`
    * **Step 4**: Agent Graph Orchestration (`agent.py`) `[COMPLETED]`
-   * **Step 5**: Demo Verification `[COMPLETED]` (Validating against issue #2081)
-2. **Stage 2**: Web Frontend & Backend API Server (FastAPI hosting the ADK runner).`[PENDING]`
+   * **Step 5**: Demo Verification `[COMPLETED]` (Successfully validated E2E against issue #2081)
+2. **Stage 2 (Pending)**: Web Frontend & Backend API Server (FastAPI hosting the ADK runner).
+   * **Step 1**: Backend API Architecture (FastAPI endpoints `/run`, `/run_sse`, `/sessions`, `/feedback`) `[PENDING]`
+   * **Step 2**: Session & Artifact Persistence (state recovery and report file export) `[PENDING]`
+   * **Step 3**: Web Frontend Design (Harmonious HSL dark mode, Outfit typography, two-pane UI layout) `[PENDING]`
+   * **Step 4**: Real-time SSE Terminal Viewer (Streaming live agent console outputs and retry logs) `[PENDING]`
+   * **Step 5**: Interactive Report Panel (Visual triage state, test logs, and syntax-highlighted git diffs) `[PENDING]`
 3. **Stage 3**: Cloud Deployment (Deploying Backend & Frontend to Cloud).
 4. **Stage 4**: Multi-repo & Node.js Support.
 
@@ -57,14 +62,13 @@ To prevent arbitrary code execution (like malicious pre/post-install hooks or te
 
 ---
 
-## 📦 Current Status: Step 4 (Agent Graph Orchestration)
+## 📦 Current Status: Stage 1 Completed (E2E Verified)
 
 * **Step 1 (Scaffolding & Setup)** `[COMPLETED]`: Scaffolded ADK project under `bugrepro-agent/`.
 * **Step 2 (Sandbox Engine)** `[COMPLETED]`: Developed isolated `DockerSandbox` in `sandbox.py` and passed lifecycle tests.
 * **Step 3 (Core Tools)** `[COMPLETED]`: Developed custom tools in `tools.py` for issue fetching, sandbox execution, reading/writing, and patching files, passing unit tests.
-* **Step 4 (Agent Orchestration)** `[COMPLETED]`: Configured a 5-agent sequential orchestration (`SequentialAgent` in `agent.py`) using Triage, Setup, Reproduction, Patch, and Verification specialist agents with automatic sandbox cleanup.
-* **Step 5 (Validation Target)** `[PENDING]`: Ready for End-to-End verification targeting GitHub issue [#2081](https://github.com/google/adk-samples/issues/2081) (TypeError/ignoring return value in `before_tool` callback's lowercasing helper).
-* Virtual environment synchronized via `uv sync`.
+* **Step 4 (Agent Orchestration)** `[COMPLETED]`: Transitioned from static sequential agent to an ADK 2.0 graph-based `Workflow` coordinating triage, setup, reproduction, patch, and verification nodes via a dynamic `run_sentinel` orchestrator.
+* **Step 5 (Demo Verification)** `[COMPLETED]`: Ran E2E verification successfully targeting GitHub issue [#2081](https://github.com/google/adk-samples/issues/2081). The system triaged the issue, cloned the repo, successfully reproduced the bug with targeted tests, applied a patch, verified it on attempt 2 (learning from attempt 1's memory), generated a unified git diff block, and auto-cleaned the sandbox.
 
 ---
 
