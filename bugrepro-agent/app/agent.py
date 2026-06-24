@@ -117,11 +117,16 @@ reproduction_agent = Agent(
         "Your task is to reproduce the reported bug inside the Docker sandbox.\n"
         "1. Check the triage status in the input or state. If 'triage_status' is 'NOT_FIXABLE', stop immediately.\n"
         "2. Read the issue details from the input. Write a reproduction test file (e.g. `tests/test_repro.py` or a script) using `write_sandbox_file` to trigger the bug.\n"
+        "   IMPORTANT: The reproduction test MUST import the functions/modules directly from the cloned repository "
+        "   (e.g., `from package.module import buggy_function`). "
+        "   DO NOT copy, redefine, or hardcode the functions or their buggy implementations inside the test file, "
+        "   as doing so will make it impossible for subsequent patches to fix the test. The test must test the "
+        "   actual codebase files in the repository.\n"
         "   IMPORTANT: The reproduction test should assert the CORRECT, EXPECTED behavior of the code. This means "
         "   the test MUST FAIL when the bug is present, and PASS only after the bug is fixed. Do not catch "
         "   or assert expected TypeErrors or failures in a way that makes the test pass when the bug is present. "
         "   Instead, write assertions for the correct expected output so the test fails on the unmodified codebase.\n"
-        "3. Run the test file using `run_sandbox_command` (e.g. `['pytest', 'python/agents/customer-service/tests/unit/test_callbacks.py']`).\n"
+        "3. Run the test file using `run_sandbox_command` (e.g. `['pytest', 'tests/test_repro.py']` or the specific path to the test file you created).\n"
         "4. Verify that you observe the expected assertion failure or crash (proving reproduction succeeded).\n"
         "5. Call `save_reproduction_results` with: \n"
         "   - `reproduced`: True if the bug was successfully reproduced with a failing test / error, False otherwise.\n"
@@ -142,7 +147,7 @@ patch_agent = Agent(
         "Your task is to apply a minimal code change to fix the reproduced bug.\n"
         "1. Check the triage status and reproduction status in the input. If triage is 'NOT_FIXABLE' or reproduction is 'NOT_REPRODUCED', stop immediately.\n"
         "2. Review the previous failed attempts in the input if they exist. Propose a completely different, corrected fixing strategy; DO NOT repeat the same failed patches.\n"
-        "3. Locate the source file containing the bug (e.g. `customer_service/shared_libraries/callbacks.py` as indicated in the issue description), read it using `read_sandbox_file`.\n"
+        "3. Locate the source file containing the bug by analyzing the reproduction results and issue description (you can use command line tools or search repository files), and read it using `read_sandbox_file`.\n"
         "4. Apply a minimal, precise code change to fix the bug using the `patch_file_content` tool.\n"
         "5. Call the `save_patch_results` tool with:\n"
         "   - `patched`: True if the patch was applied, False otherwise.\n"
@@ -162,9 +167,10 @@ verification_agent = Agent(
         "Your task is to verify that the patch fixed the bug and compile the final report.\n"
         "1. If 'triage_status' in the input or state is 'NOT_FIXABLE', output the final report showing that the issue is out of scope and call `save_verification_results` with passed=False and logs='Out of scope'.\n"
         "2. If 'reproduction_status' in the input or state is 'NOT_REPRODUCED', output that the bug could not be reproduced and call `save_verification_results` with passed=False and logs='Could not reproduce'.\n"
-        "3. If 'patch_status' in the input or state is 'PATCHED':\n"
-        "   - Run ONLY the specific reproduction test that was created (e.g., `['pytest', 'python/agents/customer-service/tests/unit/test_callbacks.py']`) using `run_sandbox_command`. DO NOT run a plain `pytest` command at the repository root, as this will collect tests from other directories and fail due to missing dependencies.\n"
-        "   - Run `run_sandbox_command` with argument `['git', 'diff']` to obtain the actual unified git diff inside the sandbox.\n"
+        "3. If 'reproduction_status' in the input or state is 'REPRODUCED':\n"
+        "   - Retrieve the reproduction test file path from 'reproduction_test_file' in the input or state.\n"
+        "   - Run ONLY that specific reproduction test file using `run_sandbox_command` (for example, `['pytest', <reproduction_test_file_path>]`). DO NOT run a plain `pytest` command at the repository root, as this will collect tests from other directories and fail due to missing dependencies.\n"
+        "   - Run `run_sandbox_command` with the arguments `['git', 'diff']` to obtain the actual unified git diff inside the sandbox.\n"
         "   - Check if the tests passed. Call `save_verification_results` with `passed=True` (if the reproduction test passes) or `passed=False` (if it fails), and pass the full stdout/stderr of the test run as the `logs` argument.\n"
         "4. Output the final 'BugRepro Sentinel Result' showing:\n"
         "   - Issue Details (URL, Title)\n"
@@ -265,23 +271,18 @@ async def run_sentinel(ctx: Context, node_input: Any) -> Any:
         f"Please identify the issue in the repository files, read the relevant file, and apply a minimal, precise patch to fix it."
     )
     
-    verify_res = None
+    repro_test_file = ctx.state.get("reproduction_test_file")
+    patch_res = ""
     while attempts <= 3:
         # Run Patch Agent
         patch_res = await ctx.run_node(patch_agent, node_input=patch_input)
         
-        # Run Verification Agent
-        verify_input = (
-            f"Issue URL: {ctx.state.get('issue_url')}\n"
-            f"Issue Title: {issue_title}\n"
-            f"Triage Status: {triage_status}\n"
-            f"Reproduction Status: {reproduction_status}\n"
-            f"Patch Status: {ctx.state.get('patch_status')}\n"
-            f"Patch Details: {ctx.state.get('patch_details')}\n"
-            f"Reproduction Test File: {ctx.state.get('reproduction_test_file')}\n\n"
-            f"Patch Agent Response:\n{patch_res}"
-        )
-        verify_res = await ctx.run_node(verification_agent, node_input=verify_input)
+        # Run verification commands directly inside the node to execute tests deterministically and prevent intermediate UI spam
+        test_res = run_sandbox_command(["pytest", repro_test_file], tool_context=ctx)
+        passed = test_res.get("exit_code") == 0
+        logs = test_res.get("stdout", "")
+        
+        save_verification_results(passed=passed, logs=logs, tool_context=ctx)
         
         verification_status = ctx.state.get("verification_status")
         if verification_status == "PASSED" or attempts >= 3:
@@ -311,7 +312,18 @@ async def run_sentinel(ctx: Context, node_input: Any) -> Any:
             f"Please analyze these failures and apply a different patch. Propose a completely different fixing strategy and do NOT repeat the same failed patches."
         )
         
-    return verify_res
+    # 5. Compile and stream the FINAL evidence report EXACTLY ONCE after the patch loop finishes
+    verify_input = (
+        f"Issue URL: {ctx.state.get('issue_url')}\n"
+        f"Issue Title: {issue_title}\n"
+        f"Triage Status: {triage_status}\n"
+        f"Reproduction Status: {reproduction_status}\n"
+        f"Patch Status: {ctx.state.get('patch_status')}\n"
+        f"Patch Details: {ctx.state.get('patch_details')}\n"
+        f"Reproduction Test File: {repro_test_file}\n\n"
+        f"Patch Agent Response:\n{patch_res}"
+    )
+    return await ctx.run_node(verification_agent, node_input=verify_input)
 
 # Root coordinator orchestrator
 root_agent = Workflow(

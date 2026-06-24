@@ -54,10 +54,28 @@ class DockerSandbox:
                 detach=True,
                 name=self.container_name,
                 network_mode="bridge",
+                environment={
+                    "GOOGLE_CLOUD_PROJECT": "mock-project",
+                    "GOOGLE_APPLICATION_CREDENTIALS": "/workspace/mock_creds.json",
+                    "GOOGLE_GENAI_USE_VERTEXAI": "True",
+                    "GOOGLE_API_KEY": "mock-key"
+                }
             )
             # Ensure workspace directory exists inside the container
             logger.info("Ensuring /workspace directory exists inside container...")
             self.execute(["mkdir", "-p", self.workspace_dir], workdir="/")
+            
+            # Write dummy GCP credentials to bypass google.auth.default() crash
+            mock_creds = (
+                '{\n'
+                '  "type": "service_account",\n'
+                '  "project_id": "mock-project",\n'
+                '  "private_key_id": "mock-key-id",\n'
+                '  "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC3\\n-----END PRIVATE KEY-----\\n",\n'
+                '  "client_email": "mock-email@mock-project.iam.gserviceaccount.com"\n'
+                '}\n'
+            )
+            self.write_file(f"{self.workspace_dir}/mock_creds.json", mock_creds)
         except Exception as e:
             logger.error(f"Failed to start sandbox container: {e}")
             raise RuntimeError(f"Failed to start sandbox container: {e}")
