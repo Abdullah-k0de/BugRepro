@@ -34,7 +34,7 @@ interface Phase {
 }
 
 export default function App() {
-  const [issueUrl, setIssueUrl] = useState('https://github.com/google/adk-samples/issues/2081');
+  const [issueUrl, setIssueUrl] = useState('');
   const [status, setStatus] = useState<'idle' | 'running' | 'completed' | 'failed'>('idle');
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [logs, setLogs] = useState<LogLine[]>([]);
@@ -363,10 +363,10 @@ export default function App() {
       if (trimmed.startsWith('```')) {
         if (currentCodeBlock) {
           const isDiff = currentCodeBlock.lang === 'diff' ||
-                         currentCodeBlock.lines.some(l => {
-                           const t = l.trim();
-                           return t.startsWith('diff --git') || t.startsWith('--- ') || t.startsWith('+++ ');
-                         });
+            currentCodeBlock.lines.some(l => {
+              const t = l.trim();
+              return t.startsWith('diff --git') || t.startsWith('--- ') || t.startsWith('+++ ');
+            });
           elements.push(
             <div key={`code-${i}`} className="diff-container">
               <div className="diff-header">{isDiff ? 'DIFF' : currentCodeBlock.lang.toUpperCase()} VIEW</div>
