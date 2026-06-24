@@ -14,12 +14,12 @@ All operations (cloning, dependency installation, running command lines, writing
    * **Step 3**: Core Tools Implementation (`tools.py`) `[COMPLETED]`
    * **Step 4**: Agent Graph Orchestration (`agent.py`) `[COMPLETED]`
    * **Step 5**: Demo Verification `[COMPLETED]` (Successfully validated E2E against issue #2081)
-2. **Stage 2 (Pending)**: Web Frontend & Backend API Server (FastAPI hosting the ADK runner).
-   * **Step 1**: Backend API Architecture (FastAPI endpoints `/run`, `/run_sse`, `/sessions`, `/feedback`) `[PENDING]`
-   * **Step 2**: Session & Artifact Persistence (state recovery and report file export) `[PENDING]`
-   * **Step 3**: Web Frontend Design (Harmonious HSL dark mode, Outfit typography, two-pane UI layout) `[PENDING]`
-   * **Step 4**: Real-time SSE Terminal Viewer (Streaming live agent console outputs and retry logs) `[PENDING]`
-   * **Step 5**: Interactive Report Panel (Visual triage state, test logs, and syntax-highlighted git diffs) `[PENDING]`
+2. **Stage 2 (Completed)**: Web Frontend & Backend API Server (FastAPI hosting the ADK runner).
+   * **Step 1**: Backend API Architecture (FastAPI endpoints `/run`, `/run_sse`, `/sessions`, `/feedback`) `[COMPLETED]`
+   * **Step 2**: Session & Artifact Persistence (state recovery and report file export) `[COMPLETED]`
+   * **Step 3**: Web Frontend Design (Harmonious HSL light/dark mode, Outfit typography, two-pane UI layout) `[COMPLETED]`
+   * **Step 4**: Real-time SSE Terminal Viewer (Streaming live agent console outputs and retry logs) `[COMPLETED]`
+   * **Step 5**: Interactive Report Panel (Visual triage state, test logs, and syntax-highlighted git diffs) `[COMPLETED]`
 3. **Stage 3**: Cloud Deployment (Deploying Backend & Frontend to Cloud).
 4. **Stage 4**: Multi-repo & Node.js Support.
 
@@ -72,19 +72,33 @@ To prevent arbitrary code execution (like malicious pre/post-install hooks or te
 
 ---
 
-## 🛠️ Local Development (Stage 1)
+## 🛠️ Local Development (Stage 2)
 
-Prerequisites
-
+Prerequisites:
 * Python 3.11+
 * Docker running on the host system
 * `uv` installed (`pip install uv`)
+* Node.js 18+ and `npm` installed
 
-### Setup
-
-1. Clone this repository.
-2. Synchronize dependencies:
+### 1. Setup Backend API Server
+1. Navigate to the agent folder and sync dependencies:
    ```bash
    cd bugrepro-agent
    uv sync
    ```
+2. Start the FastAPI development server:
+   ```bash
+   uv run uvicorn app.fast_api_app:app --host 127.0.0.1 --port 8000
+   ```
+
+### 2. Setup Frontend Web Client
+1. Navigate to the frontend folder and install dependencies:
+   ```bash
+   cd ../bugrepro-frontend
+   npm install
+   ```
+2. Start the Vite React development server:
+   ```bash
+   npm run dev
+   ```
+3. Open `http://localhost:5173` in your browser and enter a GitHub issue link (e.g. `https://github.com/google/adk-samples/issues/2081` or your playground repository link) to run Sentinel!
