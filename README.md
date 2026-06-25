@@ -200,7 +200,7 @@ Rather than executing slow nested Docker-in-Docker processes, the backend contai
      --name sentinel-backend \
      -v /var/run/docker.sock:/var/run/docker.sock \
      -p 8000:8000 \
-     -e ALLOW_ORIGINS="https://bugrepro-sentinel.web.app" \
+     -e ALLOW_ORIGINS="https://bug-repro-17eb1.web.app" \
      us-central1-docker.pkg.dev/YOUR_PROJECT_ID/repro-registry/bugrepro-backend:latest
    ```
 
