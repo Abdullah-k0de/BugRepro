@@ -216,6 +216,13 @@ export default function App() {
     e.preventDefault();
     if (!issueUrl.trim()) return;
 
+    // Security Policy Validation: Ensure it's a valid GitHub Issue URL
+    const match = issueUrl.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
+    if (!match) {
+      setErrorMsg('Security Policy Violation: Invalid URL. Sentinel only accepts valid public GitHub issue URLs (e.g., https://github.com/owner/repo/issues/123).');
+      return;
+    }
+
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
     }
@@ -237,55 +244,56 @@ export default function App() {
     ]);
 
     // Parse GitHub Issue URL and fetch details
-    let owner = '';
-    let repo = '';
-    let number = '';
-    const match = issueUrl.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
-    if (match) {
-      owner = match[1];
-      repo = match[2];
-      number = match[3];
-      setIssueDetails({
-        title: 'Fetching issue details...',
-        body: '',
-        repoName: `${owner}/${repo}`,
-        number: number
-      });
-      fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${number}`, { signal: controller.signal })
-        .then(async (res) => {
-          if (!res.ok) {
-            throw new Error(`GitHub API returned ${res.status}`);
-          }
-          const data = await res.json();
-          setIssueDetails({
-            title: data.title || 'Untitled Issue',
-            body: data.body || 'No description provided.',
-            repoName: `${owner}/${repo}`,
-            number: number
-          });
-        })
-        .catch((err) => {
-          if (err.name === 'AbortError') return;
-          console.warn('Failed to fetch issue from GitHub API:', err);
-          setIssueDetails({
-            title: `Issue #${number}`,
-            body: `View issue details on GitHub: ${issueUrl}`,
-            repoName: `${owner}/${repo}`,
-            number: number
-          });
-        });
-    } else {
-      setIssueDetails({
-        title: 'Sentinel Custom Target',
-        body: issueUrl,
-        repoName: 'Custom Target',
-        number: ''
-      });
-    }
+    const urlMatch = issueUrl.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/)!;
+    const owner = urlMatch[1];
+    const repo = urlMatch[2];
+    const number = urlMatch[3];
 
     const userId = `web_user_${Math.floor(Math.random() * 1000)}`;
 
     try {
+      addLog('System', 'Validating GitHub issue eligibility...', 'system');
+      setIssueDetails({
+        title: 'Validating issue details...',
+        body: '',
+        repoName: `${owner}/${repo}`,
+        number: number
+      });
+
+      let issueData = null;
+      try {
+        const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${number}`, { signal: controller.signal });
+        if (ghRes.ok) {
+          issueData = await ghRes.json();
+        } else if (ghRes.status === 404) {
+          throw new Error('The specified GitHub issue could not be found. Please check that the URL is correct and the repository is public.');
+        } else if (ghRes.status !== 403) {
+          throw new Error(`Failed to validate GitHub issue: HTTP ${ghRes.status}`);
+        }
+      } catch (ghErr: any) {
+        if (ghErr.name === 'AbortError') throw ghErr;
+        if (ghErr.message.includes('could not be found') || ghErr.message.includes('Failed to validate')) {
+          throw ghErr;
+        }
+        console.warn('GitHub API pre-validation warning (bypassing):', ghErr);
+      }
+
+      if (issueData) {
+        setIssueDetails({
+          title: issueData.title || 'Untitled Issue',
+          body: issueData.body || 'No description provided.',
+          repoName: `${owner}/${repo}`,
+          number: number
+        });
+      } else {
+        setIssueDetails({
+          title: `Issue #${number}`,
+          body: `View issue details on GitHub: ${issueUrl}`,
+          repoName: `${owner}/${repo}`,
+          number: number
+        });
+      }
+
       addLog('System', 'Starting session...', 'system');
 
       // 1. Create session via FastAPI session service
