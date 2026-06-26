@@ -683,9 +683,30 @@ export default function App() {
                 <div style={{ textAlign: 'center', marginBottom: '16px' }}>
                   <Shield size={64} style={{ color: 'hsl(var(--primary))', opacity: 0.85, marginBottom: '12px' }} />
                   <h2 style={{ fontSize: '1.5rem', fontWeight: 700 }}>Sandbox Repair Engine</h2>
-                  <p style={{ color: 'hsl(var(--muted))', fontSize: '0.9rem', marginTop: '6px' }}>
-                    Enter a public Python repository issue URL to automatically isolate, reproduce, patch, and verify the fix.
+                  <p style={{ color: 'hsl(var(--muted))', fontSize: '0.9rem', marginTop: '6px', marginBottom: '16px' }}>
+                    Enter a public repository issue URL to automatically isolate, reproduce, patch, and verify the fix.
                   </p>
+                  <div style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    justifyContent: 'center',
+                    gap: '8px',
+                    marginBottom: '24px'
+                  }}>
+                    {['Python', 'JavaScript / TypeScript', 'Go', 'Rust', 'Java', 'C / C++'].map((lang) => (
+                      <span key={lang} style={{
+                        fontSize: '0.75rem',
+                        fontWeight: 600,
+                        backgroundColor: 'rgba(128, 128, 128, 0.12)',
+                        color: 'hsl(var(--muted))',
+                        padding: '4px 10px',
+                        borderRadius: '12px',
+                        border: '1px solid rgba(128, 128, 128, 0.15)'
+                      }}>
+                        {lang}
+                      </span>
+                    ))}
+                  </div>
                 </div>
                 {errorMsg && (
                   <div style={{
