@@ -9,7 +9,9 @@ import {
   XCircle,
   Loader2,
   FileText,
-  AlertCircle
+  AlertCircle,
+  StopCircle,
+  RotateCcw
 } from 'lucide-react';
 import {
   RingLoader,
@@ -33,13 +35,63 @@ interface Phase {
   status: 'pending' | 'active' | 'completed' | 'failed';
 }
 
+interface IssueDetails {
+  title: string;
+  body: string;
+  repoName: string;
+  number: string;
+}
+
+const stripMarkdown = (md: string): string => {
+  if (!md) return '';
+  return md
+    .replace(/```[\s\S]*?```/g, '') // remove code blocks
+    .replace(/#+\s+.+/g, '') // remove headings
+    .replace(/`([^`]+)`/g, '$1') // remove inline code
+    .replace(/\*\*([^*]+)\*\*/g, '$1') // remove bold
+    .replace(/\*([^*]+)\*/g, '$1') // remove italic
+    .replace(/^\s*[-*+]\s+/gm, '') // remove bullet points
+    .replace(/\n+/g, ' ') // collapse whitespace
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
 export default function App() {
+  const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
   const [issueUrl, setIssueUrl] = useState('');
-  const [status, setStatus] = useState<'idle' | 'running' | 'completed' | 'failed'>('idle');
+  const [status, setStatus] = useState<'idle' | 'running' | 'completed' | 'failed' | 'stopped'>('idle');
   const [theme, setTheme] = useState<'dark' | 'light'>('light');
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [report, setReport] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
+  const [issueDetails, setIssueDetails] = useState<IssueDetails | null>(null);
+  const [isDescExpanded, setIsDescExpanded] = useState(false);
+  const [isTerminalMaximized, setIsTerminalMaximized] = useState(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isResettingRef = useRef(false);
+
+  const resetWorkspace = () => {
+    isResettingRef.current = true;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setStatus('idle');
+    setIssueUrl('');
+    setIssueDetails(null);
+    setIsDescExpanded(false);
+    setIsTerminalMaximized(false);
+    setLogs([]);
+    setReport('');
+    setErrorMsg('');
+    setPhases([
+      { name: 'Issue Triage', description: 'Checking issue details and eligibility.', status: 'pending' },
+      { name: 'Sandbox Setup', description: 'Cloning repo & installing dependencies in Docker.', status: 'pending' },
+      { name: 'Bug Reproduction', description: 'Creating and running a reproduction test.', status: 'pending' },
+      { name: 'Patch Proposal', description: 'Generating and applying a minimal code fix.', status: 'pending' },
+      { name: 'Verification', description: 'Re-running tests and extracting git diff.', status: 'pending' }
+    ]);
+  };
 
   // Phase checklist
   const [phases, setPhases] = useState<Phase[]>([
@@ -153,9 +205,22 @@ export default function App() {
     }
   };
 
+  const stopExecution = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+  };
+
   const startSentinel = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!issueUrl.trim()) return;
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
 
     setStatus('running');
     setLogs([]);
@@ -171,16 +236,64 @@ export default function App() {
       { name: 'Verification', description: 'Re-running tests and extracting git diff.', status: 'pending' }
     ]);
 
+    // Parse GitHub Issue URL and fetch details
+    let owner = '';
+    let repo = '';
+    let number = '';
+    const match = issueUrl.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
+    if (match) {
+      owner = match[1];
+      repo = match[2];
+      number = match[3];
+      setIssueDetails({
+        title: 'Fetching issue details...',
+        body: '',
+        repoName: `${owner}/${repo}`,
+        number: number
+      });
+      fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${number}`, { signal: controller.signal })
+        .then(async (res) => {
+          if (!res.ok) {
+            throw new Error(`GitHub API returned ${res.status}`);
+          }
+          const data = await res.json();
+          setIssueDetails({
+            title: data.title || 'Untitled Issue',
+            body: data.body || 'No description provided.',
+            repoName: `${owner}/${repo}`,
+            number: number
+          });
+        })
+        .catch((err) => {
+          if (err.name === 'AbortError') return;
+          console.warn('Failed to fetch issue from GitHub API:', err);
+          setIssueDetails({
+            title: `Issue #${number}`,
+            body: `View issue details on GitHub: ${issueUrl}`,
+            repoName: `${owner}/${repo}`,
+            number: number
+          });
+        });
+    } else {
+      setIssueDetails({
+        title: 'Sentinel Custom Target',
+        body: issueUrl,
+        repoName: 'Custom Target',
+        number: ''
+      });
+    }
+
     const userId = `web_user_${Math.floor(Math.random() * 1000)}`;
 
     try {
       addLog('System', 'Starting session...', 'system');
 
       // 1. Create session via FastAPI session service
-      const sessionRes = await fetch(`http://localhost:8000/apps/app/users/${userId}/sessions`, {
+      const sessionRes = await fetch(`${API_BASE_URL}/apps/app/users/${userId}/sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ state: {} })
+        body: JSON.stringify({ state: {} }),
+        signal: controller.signal
       });
 
       if (!sessionRes.ok) {
@@ -193,7 +306,7 @@ export default function App() {
 
       // 2. Open ReadableStream connection to read the POST SSE stream
       addLog('System', 'Triggering Sentinel multi-agent workflow...', 'system');
-      const response = await fetch('http://localhost:8000/run_sse', {
+      const response = await fetch(`${API_BASE_URL}/run_sse`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -205,7 +318,8 @@ export default function App() {
             parts: [{ text: issueUrl }]
           },
           streaming: true
-        })
+        }),
+        signal: controller.signal
       });
 
       if (!response.ok) {
@@ -248,12 +362,27 @@ export default function App() {
       setStatus('completed');
       updatePhase('Verification', 'completed');
     } catch (err: any) {
+      if (err.name === 'AbortError') {
+        if (isResettingRef.current) {
+          isResettingRef.current = false;
+          return;
+        }
+        setStatus('stopped');
+        addLog('System', 'Sentinel Agent execution stopped by user.', 'warning');
+        setPhases(prev => prev.map(p => p.status === 'active' || p.status === 'pending' ? { ...p, status: 'failed' } : p));
+        return;
+      }
       console.error(err);
       setErrorMsg(err.message || 'An unexpected error occurred during execution.');
       setStatus('failed');
       addLog('System', `Error: ${err.message}`, 'error');
       // Mark current active phase as failed
       setPhases(prev => prev.map(p => p.status === 'active' ? { ...p, status: 'failed' } : p));
+    } finally {
+      isResettingRef.current = false;
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
     }
   };
 
@@ -521,26 +650,22 @@ export default function App() {
               </span>
             )}
             {status === 'completed' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span className="status-badge passed">
-                  <CheckCircle size={14} />
-                  Execution Passed
-                </span>
-                <button onClick={() => setStatus('idle')} className="btn" style={{ padding: '4px 8px', fontSize: '0.75rem', borderRadius: '4px' }}>
-                  Reset Workspace
-                </button>
-              </div>
+              <span className="status-badge passed">
+                <CheckCircle size={14} />
+                Execution Passed
+              </span>
             )}
             {status === 'failed' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span className="status-badge failed">
-                  <XCircle size={14} />
-                  Execution Failed
-                </span>
-                <button onClick={() => setStatus('idle')} className="btn" style={{ padding: '4px 8px', fontSize: '0.75rem', borderRadius: '4px' }}>
-                  Reset Workspace
-                </button>
-              </div>
+              <span className="status-badge failed">
+                <XCircle size={14} />
+                Execution Failed
+              </span>
+            )}
+            {status === 'stopped' && (
+              <span className="status-badge stopped">
+                <XCircle size={14} />
+                Execution Stopped
+              </span>
             )}
           </div>
 
@@ -592,27 +717,93 @@ export default function App() {
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '20px' }}>
-                {/* Real-time Phases checklist */}
-                <div className="phases-timeline">
-                  {phases.map((p, idx) => (
-                    <div key={idx} className={`phase-item ${p.status}`}>
-                      <div className="phase-status-icon">
-                        {p.status === 'pending' && <span style={{ fontSize: '0.8rem', fontWeight: 'bold' }}>{idx + 1}</span>}
-                        {p.status === 'active' && <Loader2 size={14} className="animate-spin" />}
-                        {p.status === 'completed' && <CheckCircle size={14} />}
-                        {p.status === 'failed' && <XCircle size={14} />}
-                      </div>
-                      <div className="phase-info">
-                        <div className="phase-name">{p.name}</div>
-                        <div className="phase-desc">{p.description}</div>
-                      </div>
+                {!isTerminalMaximized && issueDetails && (
+                  <div className="active-issue-card">
+                    <div className="issue-meta">
+                      <span className="repo-badge">{issueDetails.repoName}</span>
+                      {issueDetails.number && (
+                        <span className="issue-number">#{issueDetails.number}</span>
+                      )}
                     </div>
-                  ))}
-                </div>
+                    <h3 className="issue-title">{issueDetails.title}</h3>
+                    {issueDetails.body && (
+                      <div className="issue-desc-container">
+                        {isDescExpanded ? (
+                          <div className="issue-desc expanded">
+                            {renderMarkdown(issueDetails.body)}
+                          </div>
+                        ) : (
+                          <p className="issue-desc collapsed">
+                            {stripMarkdown(issueDetails.body)}
+                          </p>
+                        )}
+                        {issueDetails.body.length > 180 && (
+                          <button
+                            type="button"
+                            className="btn-link"
+                            onClick={() => setIsDescExpanded(!isDescExpanded)}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              color: 'hsl(var(--primary))',
+                              fontSize: '0.8rem',
+                              fontWeight: 600,
+                              padding: 0,
+                              cursor: 'pointer',
+                              marginTop: '6px',
+                              textAlign: 'left'
+                            }}
+                          >
+                            {isDescExpanded ? 'Show Less' : 'Show More'}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    <div className="issue-actions">
+                      <button
+                        type="button"
+                        disabled={status !== 'running'}
+                        onClick={stopExecution}
+                        className="btn btn-stop"
+                      >
+                        <StopCircle size={16} />
+                        Stop Agent Run
+                      </button>
+                      <button
+                        type="button"
+                        onClick={resetWorkspace}
+                        className="btn btn-another"
+                      >
+                        <RotateCcw size={16} />
+                        Reset and Run another
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Real-time Phases checklist */}
+                {!isTerminalMaximized && (
+                  <div className="phases-timeline">
+                    {phases.map((p, idx) => (
+                      <div key={idx} className={`phase-item ${p.status}`}>
+                        <div className="phase-status-icon">
+                          {p.status === 'pending' && <span style={{ fontSize: '0.8rem', fontWeight: 'bold' }}>{idx + 1}</span>}
+                          {p.status === 'active' && <Loader2 size={14} className="animate-spin" />}
+                          {p.status === 'completed' && <CheckCircle size={14} />}
+                          {p.status === 'failed' && <XCircle size={14} />}
+                        </div>
+                        <div className="phase-info">
+                          <div className="phase-name">{p.name}</div>
+                          <div className="phase-desc">{p.description}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
 
                 {/* Live Sandbox Terminal console logs */}
-                <div style={{ flex: 1, minHeight: '200px' }}>
-                  <div className="terminal-wrapper">
+                <div style={{ flex: 1, minHeight: isTerminalMaximized ? '100%' : '200px', display: 'flex', flexDirection: 'column' }}>
+                  <div className="terminal-wrapper" style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                     <div className="terminal-header">
                       <div className="terminal-dots">
                         <div className="terminal-dot red"></div>
@@ -620,9 +811,30 @@ export default function App() {
                         <div className="terminal-dot green"></div>
                       </div>
                       <span className="terminal-title">sandbox@sentinel:~/workspace</span>
-                      <div style={{ width: '42px' }}></div>
+                      <button
+                        type="button"
+                        onClick={() => setIsTerminalMaximized(!isTerminalMaximized)}
+                        className="terminal-btn-maximize"
+                        title={isTerminalMaximized ? "Restore Terminal" : "Maximize Terminal"}
+                        style={{
+                          background: 'rgba(255, 255, 255, 0.1)',
+                          border: 'none',
+                          borderRadius: '4px',
+                          color: '#e2e8f0',
+                          fontSize: '0.72rem',
+                          fontWeight: 600,
+                          padding: '2px 8px',
+                          cursor: 'pointer',
+                          transition: 'background 0.2s',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px'
+                        }}
+                      >
+                        {isTerminalMaximized ? "Restore" : "Maximize"}
+                      </button>
                     </div>
-                    <div className="terminal-body">
+                    <div className="terminal-body" style={{ flex: 1 }}>
                       {logs.map((log) => (
                         <div key={log.id} className={`terminal-line ${log.type}`}>
                           <span style={{ opacity: 0.5, marginRight: '8px' }}>[{log.timestamp}]</span>
