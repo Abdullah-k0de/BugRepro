@@ -75,7 +75,7 @@ issue_triage_agent = Agent(
         "1. Call the `fetch_github_issue` tool using the user's provided issue URL.\n"
         "2. Examine the retrieved issue title and body. Decide if this issue is automatically fixable.\n"
         "   To be automatically fixable (FIXABLE), the issue must meet the following MVP criteria:\n"
-        "   - The repo must be a Python project.\n"
+        "   - The repo must be a Python, Node.js/TypeScript, Go, Rust, Java, C, or C++ project.\n"
         "   - There must be a clear bug description or steps to reproduce.\n"
         "   - It must not require a database, complex external APIs, private keys, or browser/UI interaction.\n"
         "3. Call the `save_triage_decision` tool with your decision (True if FIXABLE, False otherwise) and a detailed reason.\n"
@@ -116,22 +116,25 @@ reproduction_agent = Agent(
         "You are the Reproduction Agent.\n"
         "Your task is to reproduce the reported bug inside the Docker sandbox.\n"
         "1. Check the triage status in the input or state. If 'triage_status' is 'NOT_FIXABLE', stop immediately.\n"
-        "2. Read the issue details from the input. Write a reproduction test file (e.g. `tests/test_repro.py` or a script) using `write_sandbox_file` to trigger the bug.\n"
-        "   IMPORTANT: The reproduction test MUST import the functions/modules directly from the cloned repository "
-        "   (e.g., `from package.module import buggy_function`). "
-        "   DO NOT copy, redefine, or hardcode the functions or their buggy implementations inside the test file, "
-        "   as doing so will make it impossible for subsequent patches to fix the test. The test must test the "
-        "   actual codebase files in the repository.\n"
-        "   IMPORTANT: The reproduction test should assert the CORRECT, EXPECTED behavior of the code. This means "
-        "   the test MUST FAIL when the bug is present, and PASS only after the bug is fixed. Do not catch "
-        "   or assert expected TypeErrors or failures in a way that makes the test pass when the bug is present. "
-        "   Instead, write assertions for the correct expected output so the test fails on the unmodified codebase.\n"
-        "3. Run the test file using `run_sandbox_command` (e.g. `['pytest', 'tests/test_repro.py']` or the specific path to the test file you created).\n"
+        "2. Read the issue details from the input. Write a reproduction test file or script using `write_sandbox_file` to trigger the bug.\n"
+        "   - Write the test in the language of the repository (e.g., Python (`test_repro.py`), JavaScript/TypeScript (`repro.test.js`), Go (`repro_test.go`), Rust (`repro_test.rs`), Java (`ReproTest.java`), C/C++ (`repro_test.cpp`)).\n"
+        "   - IMPORTANT: The reproduction test MUST import the functions/modules directly from the cloned repository.\n"
+        "   - DO NOT copy, redefine, or hardcode the functions or their buggy implementations inside the test file, "
+        "     as doing so will make it impossible for subsequent patches to fix the test. The test must test the "
+        "     actual codebase files in the repository.\n"
+        "   - IMPORTANT: The reproduction test should assert the CORRECT, EXPECTED behavior of the code. This means "
+        "     the test MUST FAIL when the bug is present, and PASS only after the bug is fixed.\n"
+        "3. Run the test file using `run_sandbox_command` with the appropriate command for the language.\n"
+        "   - IMPORTANT (COMPILED LANGUAGES): For compiled languages like Rust, Java, and C/C++, you MUST ensure "
+        "     compilation happens before test execution. Use package-manager test commands (e.g., `['cargo', 'test']` "
+        "     or `['mvn', 'clean', 'test']`) which handle recompilation automatically, or write a shell script to run "
+        "     both compilation and execution (e.g. `g++ -o suite math.cpp repro.cpp` followed by `./suite`) and execute it.\n"
         "4. Verify that you observe the expected assertion failure or crash (proving reproduction succeeded).\n"
         "5. Call `save_reproduction_results` with: \n"
         "   - `reproduced`: True if the bug was successfully reproduced with a failing test / error, False otherwise.\n"
         "   - `failure_logs`: The test stdout/stderr showing the bug crash.\n"
         "   - `test_file_path`: The path of the reproduction test file you created or ran.\n"
+        "   - `test_command`: The command used to run the reproduction test (e.g. `['cargo', 'test']` or `['mvn', 'clean', 'test']`) as a list of strings.\n"
         "Explain your findings and the test run results to the user."
     ),
     tools=sandbox_tools + [save_reproduction_results],
@@ -148,7 +151,9 @@ patch_agent = Agent(
         "1. Check the triage status and reproduction status in the input. If triage is 'NOT_FIXABLE' or reproduction is 'NOT_REPRODUCED', stop immediately.\n"
         "2. Review the previous failed attempts in the input if they exist. Propose a completely different, corrected fixing strategy; DO NOT repeat the same failed patches.\n"
         "3. Locate the source file containing the bug by analyzing the reproduction results and issue description (you can use command line tools or search repository files), and read it using `read_sandbox_file`.\n"
-        "4. Apply a minimal, precise code change to fix the bug using the `patch_file_content` tool.\n"
+        "4. Apply a minimal, precise code change to fix the bug.\n"
+        "   - If the file is small (e.g., under 100 lines), you are STRONGLY encouraged to use the `write_sandbox_file` tool to rewrite/overwrite the entire file with your fix. This is extremely robust and avoids block-matching or indentation errors.\n"
+        "   - If the file is large, use the `patch_file_content` tool to apply a minimal, targeted patch to the buggy block.\n"
         "5. Call the `save_patch_results` tool with:\n"
         "   - `patched`: True if the patch was applied, False otherwise.\n"
         "   - `patch_details`: A description of the changes made and the file path.\n"
@@ -168,8 +173,9 @@ verification_agent = Agent(
         "1. If 'triage_status' in the input or state is 'NOT_FIXABLE', output the final report showing that the issue is out of scope and call `save_verification_results` with passed=False and logs='Out of scope'.\n"
         "2. If 'reproduction_status' in the input or state is 'NOT_REPRODUCED', output that the bug could not be reproduced and call `save_verification_results` with passed=False and logs='Could not reproduce'.\n"
         "3. If 'reproduction_status' in the input or state is 'REPRODUCED':\n"
-        "   - Retrieve the reproduction test file path from 'reproduction_test_file' in the input or state.\n"
-        "   - Run ONLY that specific reproduction test file using `run_sandbox_command` (for example, `['pytest', <reproduction_test_file_path>]`). DO NOT run a plain `pytest` command at the repository root, as this will collect tests from other directories and fail due to missing dependencies.\n"
+        "   - Retrieve the reproduction test file path from 'reproduction_test_file' and the test command from 'reproduction_test_command' in the input or state.\n"
+        "   - Run the reproduction test using `run_sandbox_command` with the saved `reproduction_test_command` command.\n"
+        "     IMPORTANT: If the codebase is a compiled language (Rust, Java, C/C++), make sure standard compilation is executed (or a clean rebuild is triggered) before executing the tests so that the patch changes are correctly picked up.\n"
         "   - Run `run_sandbox_command` with the arguments `['git', 'diff']` to obtain the actual unified git diff inside the sandbox.\n"
         "   - Check if the tests passed. Call `save_verification_results` with `passed=True` (if the reproduction test passes) or `passed=False` (if it fails), and pass the full stdout/stderr of the test run as the `logs` argument.\n"
         "4. Output the final 'BugRepro Sentinel Result' showing:\n"
@@ -278,7 +284,21 @@ async def run_sentinel(ctx: Context, node_input: Any) -> Any:
         patch_res = await ctx.run_node(patch_agent, node_input=patch_input)
         
         # Run verification commands directly inside the node to execute tests deterministically and prevent intermediate UI spam
-        test_res = run_sandbox_command(["pytest", repro_test_file], tool_context=ctx)
+        test_command = ctx.state.get("reproduction_test_command")
+        if not test_command:
+            # Fallback based on file extension
+            if repro_test_file.endswith(".py"):
+                test_command = ["pytest", repro_test_file]
+            elif repro_test_file.endswith(".js") or repro_test_file.endswith(".ts"):
+                test_command = ["node", repro_test_file]
+            elif repro_test_file.endswith(".go"):
+                test_command = ["go", "test", repro_test_file]
+            elif repro_test_file.endswith(".rs"):
+                test_command = ["cargo", "test"]
+            else:
+                test_command = ["pytest", repro_test_file]
+        
+        test_res = run_sandbox_command(test_command, tool_context=ctx)
         passed = test_res.get("exit_code") == 0
         logs = test_res.get("stdout", "")
         

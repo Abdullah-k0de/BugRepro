@@ -18,6 +18,7 @@ import shlex
 import httpx
 import atexit
 import logging
+import docker
 from google.adk.tools import ToolContext
 from app.sandbox import DockerSandbox
 
@@ -26,6 +27,82 @@ logger = logging.getLogger("bugrepro.sandbox")
 # Global registry to store DockerSandbox instances in Python memory
 # This keeps the ADK session state JSON-serializable (contains only string sandbox_id).
 _ACTIVE_SANDBOXES = {}
+
+def ensure_sandbox_image(client) -> str:
+    """Checks if the polyglot sandbox image 'sentinel-sandbox:latest' exists.
+    If not, it builds it from 'Dockerfile.sandbox'. Falls back to 'python:3.11-slim' if build fails.
+    """
+    image_tag = "sentinel-sandbox:latest"
+    fallback_image = "python:3.11-slim"
+    
+    # 1. Check if image exists
+    try:
+        client.images.get(image_tag)
+        logger.info(f"Sandbox image '{image_tag}' found in local cache.")
+        return image_tag
+    except docker.errors.ImageNotFound:
+        logger.info(f"Sandbox image '{image_tag}' not found. Attempting to build from Dockerfile.sandbox...")
+    except Exception as e:
+        logger.warning(f"Error checking sandbox image '{image_tag}': {e}. Falling back to search/build...")
+        
+    # 2. Build the image
+    try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        parent_dir = os.path.abspath(os.path.join(current_dir, ".."))
+        dockerfile_path = os.path.join(parent_dir, "Dockerfile.sandbox")
+        
+        if not os.path.exists(dockerfile_path):
+            logger.info(f"Dockerfile.sandbox not found at '{dockerfile_path}'. Writing it dynamically...")
+            dockerfile_content = (
+                "FROM ubuntu:22.04\n"
+                "ENV DEBIAN_FRONTEND=noninteractive\n"
+                "RUN apt-get update && apt-get install -y \\\n"
+                "    curl \\\n"
+                "    git \\\n"
+                "    build-essential \\\n"
+                "    cmake \\\n"
+                "    wget \\\n"
+                "    unzip \\\n"
+                "    ca-certificates \\\n"
+                "    python3 \\\n"
+                "    python3-pip \\\n"
+                "    python3-venv \\\n"
+                "    python3-dev \\\n"
+                "    nodejs \\\n"
+                "    npm \\\n"
+                "    golang-go \\\n"
+                "    openjdk-17-jdk \\\n"
+                "    maven \\\n"
+                "    gradle \\\n"
+                "    rustc \\\n"
+                "    cargo \\\n"
+                "    && rm -rf /var/lib/apt/lists/*\n"
+                "RUN ln -sf /usr/bin/python3 /usr/bin/python && \\\n"
+                "    ln -sf /usr/bin/pip3 /usr/bin/pip\n"
+                "WORKDIR /workspace\n"
+            )
+            try:
+                with open(dockerfile_path, "w", encoding="utf-8") as f:
+                    f.write(dockerfile_content)
+            except Exception as write_err:
+                logger.warning(f"Could not write Dockerfile.sandbox: {write_err}. Will build from in-memory context.")
+        
+        logger.info(f"Building Docker image '{image_tag}' using context '{parent_dir}'...")
+        image, build_logs = client.images.build(
+            path=parent_dir,
+            dockerfile="Dockerfile.sandbox",
+            tag=image_tag,
+            rm=True
+        )
+        for log in build_logs:
+            if 'stream' in log:
+                logger.info(f"[Docker Build] {log['stream'].strip()}")
+                
+        logger.info(f"Successfully built '{image_tag}'.")
+        return image_tag
+    except Exception as e:
+        logger.error(f"Failed to build '{image_tag}': {e}. Falling back to '{fallback_image}'.")
+        return fallback_image
 
 def get_sandbox(tool_context: ToolContext) -> DockerSandbox | None:
     """Retrieves the active DockerSandbox instance from the global registry,
@@ -40,7 +117,13 @@ def get_sandbox(tool_context: ToolContext) -> DockerSandbox | None:
         
         # Process restart/reload recovery: Re-initialize DockerSandbox using running container name
         try:
-            sandbox = DockerSandbox(image="python:3.11-slim")
+            client = docker.from_env()
+            image = "sentinel-sandbox:latest"
+            try:
+                client.images.get(image)
+            except Exception:
+                image = "python:3.11-slim"
+            sandbox = DockerSandbox(image=image)
             sandbox.container_name = sandbox_id
             # Retrieve reference to existing container
             sandbox.container = sandbox.client.containers.get(sandbox_id)
@@ -80,8 +163,8 @@ atexit.register(cleanup_all_sandboxes)
 # Security boundaries: Allowed characters and file types
 ALLOWED_PATH_PATTERN = re.compile(r'^[a-zA-Z0-9_\-\.\/]+$')
 ALLOWED_FILE_PATTERN = re.compile(
-    r'^([a-zA-Z0-9_\-\.\/]+)\.(py|toml|json|txt|md|yaml|yml|ini|cfg|pyi)$'
-    r'|^[a-zA-Z0-9_\-\.]*(LICENSE|README|py\.typed|requirements[a-zA-Z0-9_\-\.]*)$',
+    r'^([a-zA-Z0-9_\-\.\/]+)\.(py|toml|json|txt|md|yaml|yml|ini|cfg|pyi|js|jsx|ts|tsx|go|rs|java|xml|gradle|c|cpp|cc|h|hpp)$'
+    r'|^[a-zA-Z0-9_\-\.]*(LICENSE|README|py\.typed|requirements[a-zA-Z0-9_\-\.]*|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|package\.json|package-lock\.json|yarn\.lock|Makefile|CMakeLists\.txt)$',
     re.IGNORECASE
 )
 
@@ -115,6 +198,12 @@ def validate_sandbox_path(filepath: str) -> str:
         
     return normalized
 
+ALLOWED_COMMANDS = {
+    "pytest", "python", "python3", "pip", "pip3", "git",
+    "npm", "node", "go", "cargo", "rustc", "gcc", "g++",
+    "make", "cmake", "mvn", "gradle", "ls", "mkdir", "rm", "cat", "find", "grep", "chmod", "sh"
+}
+
 def sanitize_command(command_args: list[str] | str) -> list[str]:
     """Sanitizes and validates the command to prevent shell chaining and command injection."""
     if isinstance(command_args, str):
@@ -122,21 +211,34 @@ def sanitize_command(command_args: list[str] | str) -> list[str]:
         for char in ["&&", ";", "|", "`", "$("]:
             if char in command_args:
                 raise ValueError(f"Security Policy Violation: Command chaining/substitution characters ('{char}') are not allowed.")
-        return shlex.split(command_args)
-    
-    if not isinstance(command_args, list):
+        args_list = shlex.split(command_args)
+    elif isinstance(command_args, list):
+        # Check each argument in the list
+        for arg in command_args:
+            if not isinstance(arg, str):
+                raise TypeError("All command arguments must be strings.")
+            # Check if the argument contains chaining operators or command injection attempts
+            for char in ["&&", ";", "|", "`", "$("]:
+                if char in arg:
+                    raise ValueError(f"Security Policy Violation: Command chaining/substitution characters ('{char}') are not allowed.")
+        args_list = command_args
+    else:
         raise TypeError("Command must be a list of strings or a string.")
-        
-    # Check each argument in the list
-    for arg in command_args:
-        if not isinstance(arg, str):
-            raise TypeError("All command arguments must be strings.")
-        # Check if the argument contains chaining operators or command injection attempts
-        for char in ["&&", ";", "|", "`", "$("]:
-            if char in arg:
-                raise ValueError(f"Security Policy Violation: Command chaining/substitution characters ('{char}') are not allowed.")
-                
-    return command_args
+
+    if not args_list:
+        raise ValueError("Security Policy Violation: Command cannot be empty.")
+
+    binary = args_list[0]
+    base_binary = os.path.basename(binary)
+    
+    # Allow executing local binaries compiled in the workspace (e.g. ./test_suite or ./gradlew)
+    is_local_exec = binary.startswith("./") or binary.startswith("/workspace/")
+    
+    if not is_local_exec:
+        if base_binary not in ALLOWED_COMMANDS:
+            raise ValueError(f"Security Policy Violation: Command '{base_binary}' is not in the allowed commands whitelist.")
+            
+    return args_list
 
 def validate_repo_url(repo_url: str):
     """Validates that the repo_url is a valid HTTPS GitHub repository URL."""
@@ -209,7 +311,10 @@ def clone_and_setup_repo(repo_url: str, tool_context: ToolContext) -> dict:
 
     sandbox = get_sandbox(tool_context)
     if not sandbox:
-        sandbox = DockerSandbox(image="python:3.11-slim")
+        # Determine the image dynamically
+        client = docker.from_env()
+        image = ensure_sandbox_image(client)
+        sandbox = DockerSandbox(image=image)
         try:
             sandbox.start()
             _ACTIVE_SANDBOXES[sandbox.container_name] = sandbox
@@ -218,7 +323,7 @@ def clone_and_setup_repo(repo_url: str, tool_context: ToolContext) -> dict:
         except Exception as e:
             return {"status": "error", "message": f"Failed to start sandbox: {str(e)}"}
     
-    # Clone the repo. We update apt and install git first because python-slim does not have git by default.
+    # Clone the repo. We update apt and install git first because ubuntu base doesn't have git by default
     sandbox.execute(["apt-get", "update"], workdir="/")
     sandbox.execute(["apt-get", "install", "-y", "git"], workdir="/")
     
@@ -233,32 +338,81 @@ def clone_and_setup_repo(repo_url: str, tool_context: ToolContext) -> dict:
             "message": f"Failed to clone repository: {clone_res['stdout']}"
         }
             
-    # Detect configuration files
-    ls_res = sandbox.execute(["ls", "-la"])
-    files = ls_res["stdout"]
+    # Detect configuration files recursively (up to 3 levels deep)
+    find_res = sandbox.execute([
+        "find", ".", "-maxdepth", "3",
+        "-name", "package.json", "-o",
+        "-name", "go.mod", "-o",
+        "-name", "Cargo.toml", "-o",
+        "-name", "pom.xml", "-o",
+        "-name", "build.gradle", "-o",
+        "-name", "requirements.txt", "-o",
+        "-name", "pyproject.toml", "-o",
+        "-name", "Makefile", "-o",
+        "-name", "CMakeLists.txt"
+    ])
+    found_files = [line.strip() for line in find_res["stdout"].splitlines() if line.strip()]
     
-    setup_status = "unknown"
-    install_log = ""
+    detected_langs = []
+    install_logs = []
     
-    # Install dependencies
-    if "requirements.txt" in files:
-        setup_status = "requirements.txt"
-        install_res = sandbox.execute(["pip", "install", "-r", "requirements.txt"])
-        install_log = install_res["stdout"]
-    elif "pyproject.toml" in files:
-        setup_status = "pyproject.toml"
-        install_res = sandbox.execute(["pip", "install", "."])
-        install_log = install_res["stdout"]
-        # Also ensure pytest is installed
-        sandbox.execute(["pip", "install", "pytest"])
-    else:
-        sandbox.execute(["pip", "install", "pytest"])
-        setup_status = "no dependency file detected, installed pytest"
+    # Group setup by directories to handle multiple monorepo subprojects
+    for file_path in found_files:
+        rel_dir = os.path.dirname(file_path)
+        # Normalize relative directory
+        if rel_dir.startswith("./"):
+            rel_dir = rel_dir[2:]
+        workdir = f"/workspace/{rel_dir}" if rel_dir and rel_dir != "." else "/workspace"
+        filename = os.path.basename(file_path)
         
+        if filename == "package.json":
+            detected_langs.append(f"Node.js ({file_path})")
+            install_res = sandbox.execute(["npm", "install"], workdir=workdir)
+            install_logs.append(f"--- npm install in {workdir} ---\n{install_res['stdout']}")
+        elif filename == "go.mod":
+            detected_langs.append(f"Go ({file_path})")
+            install_res = sandbox.execute(["go", "mod", "download"], workdir=workdir)
+            install_logs.append(f"--- go mod download in {workdir} ---\n{install_res['stdout']}")
+        elif filename == "Cargo.toml":
+            detected_langs.append(f"Rust ({file_path})")
+            install_res = sandbox.execute(["cargo", "build"], workdir=workdir)
+            install_logs.append(f"--- cargo build in {workdir} ---\n{install_res['stdout']}")
+        elif filename == "pom.xml":
+            detected_langs.append(f"Java Maven ({file_path})")
+            install_res = sandbox.execute(["mvn", "dependency:resolve"], workdir=workdir)
+            install_logs.append(f"--- mvn dependency:resolve in {workdir} ---\n{install_res['stdout']}")
+        elif filename == "build.gradle":
+            detected_langs.append(f"Java Gradle ({file_path})")
+            # Use gradlew if present in the same directory, otherwise use system gradle
+            if any(f.endswith("gradlew") for f in found_files):
+                sandbox.execute(["chmod", "+x", "./gradlew"], workdir=workdir)
+                install_res = sandbox.execute(["./gradlew", "dependencies"], workdir=workdir)
+            else:
+                install_res = sandbox.execute(["gradle", "dependencies"], workdir=workdir)
+            install_logs.append(f"--- gradle dependencies in {workdir} ---\n{install_res['stdout']}")
+        elif filename == "requirements.txt":
+            detected_langs.append(f"Python ({file_path})")
+            install_res = sandbox.execute(["pip", "install", "-r", "requirements.txt"], workdir=workdir)
+            install_logs.append(f"--- pip install -r requirements.txt in {workdir} ---\n{install_res['stdout']}")
+        elif filename == "pyproject.toml":
+            detected_langs.append(f"Python ({file_path})")
+            install_res = sandbox.execute(["pip", "install", "."], workdir=workdir)
+            install_logs.append(f"--- pip install . in {workdir} ---\n{install_res['stdout']}")
+        elif filename == "Makefile":
+            detected_langs.append(f"C/C++ Makefile ({file_path})")
+        elif filename == "CMakeLists.txt":
+            detected_langs.append(f"C/C++ CMake ({file_path})")
+            
+    # Always ensure pytest is installed in Python environment (useful for python testing)
+    sandbox.execute(["pip", "install", "pytest"])
+    
+    setup_status = ", ".join(detected_langs) if detected_langs else "no configuration file detected"
+    full_install_log = "\n".join(install_logs)
+    
     return {
         "status": "success",
         "setup_method": setup_status,
-        "install_log": install_log
+        "install_log": full_install_log
     }
 
 
@@ -396,13 +550,20 @@ def save_triage_decision(is_fixable: bool, reason: str, tool_context: ToolContex
     return {"status": "success", "triage_status": tool_context.state["triage_status"]}
 
 
-def save_reproduction_results(reproduced: bool, failure_logs: str, test_file_path: str, tool_context: ToolContext) -> dict:
-    """Saves the bug reproduction status and logs.
+def save_reproduction_results(
+    reproduced: bool,
+    failure_logs: str,
+    test_file_path: str,
+    tool_context: ToolContext,
+    test_command: list[str] | None = None
+) -> dict:
+    """Saves the bug reproduction status, logs, and optionally the command used to run the test.
 
     Args:
         reproduced: True if the bug was successfully reproduced with a failing test.
         failure_logs: The command logs or test failures demonstrating the bug.
         test_file_path: The path of the reproduction test file.
+        test_command: The list of string arguments representing the test command run.
 
     Returns:
         A dictionary with the save status.
@@ -410,6 +571,8 @@ def save_reproduction_results(reproduced: bool, failure_logs: str, test_file_pat
     tool_context.state["reproduction_status"] = "REPRODUCED" if reproduced else "NOT_REPRODUCED"
     tool_context.state["reproduction_logs"] = failure_logs
     tool_context.state["reproduction_test_file"] = test_file_path
+    if test_command:
+        tool_context.state["reproduction_test_command"] = test_command
     return {"status": "success"}
 
 
