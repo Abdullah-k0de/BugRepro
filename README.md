@@ -20,13 +20,13 @@ All operations (cloning, dependency installation, running command lines, writing
    * **Step 3**: Web Frontend Design (Harmonious HSL light/dark mode, Outfit typography, two-pane UI layout) `[COMPLETED]`
    * **Step 4**: Real-time SSE Terminal Viewer (Streaming live agent console outputs and retry logs) `[COMPLETED]`
    * **Step 5**: Interactive Report Panel (Visual triage state, test logs, and syntax-highlighted git diffs) `[COMPLETED]`
-3. **Stage 3 (Pending)**: Cloud Deployment (Deploying Decoupled Backend & Frontend to GCP).
-   * **Step 1**: Containerize Backend API (`Dockerfile` for FastAPI server)
-   * **Step 2**: Configure GCE VM with Docker engine access (sibling container socket-sharing)
-   * **Step 3**: Build & push backend container to Artifact Registry using Cloud Build
-   * **Step 4**: Deploy static Frontend to Firebase Hosting CDN
-   * **Step 5**: Setup Cloud Load Balancer with SSL termination and CORS environment rules
-   * **Step 6**: Configure automated sandbox cleanup and GCE fail-safe garbage collection
+3. **Stage 3 (Completed)**: Cloud Deployment (Deploying Decoupled Backend & Frontend to GCP).
+   * **Step 1**: Containerize Backend API (`Dockerfile` for FastAPI server) `[COMPLETED]`
+   * **Step 2**: Configure GCE VM with Docker engine access (sibling container socket-sharing) `[COMPLETED]`
+   * **Step 3**: Build & push backend container to Artifact Registry using Cloud Build `[COMPLETED]`
+   * **Step 4**: Deploy static Frontend to Firebase Hosting CDN `[COMPLETED]`
+   * **Step 5**: Configure reverse proxy via Nginx with Let's Encrypt SSL and CORS rules `[COMPLETED]`
+   * **Step 6**: Configure automated nightly sandbox cleanup and container log limits `[COMPLETED]`
 4. **Stage 4**: Multi-repo & Node.js Support.
 
 ---
@@ -68,7 +68,7 @@ To prevent arbitrary code execution (like malicious pre/post-install hooks or te
 
 ---
 
-## 📦 Current Status: Stage 1 Completed (E2E Verified)
+## 📦 Stage 1 Completed (E2E Verified)
 
 * **Step 1 (Scaffolding & Setup)** `[COMPLETED]`: Scaffolded ADK project under `bugrepro-agent/`.
 * **Step 2 (Sandbox Engine)** `[COMPLETED]`: Developed isolated `DockerSandbox` in `sandbox.py` and passed lifecycle tests.
@@ -132,6 +132,7 @@ graph TD
 ---
 
 ### 1. Frontend Deployment (Firebase Hosting / CDN)
+
 The React frontend compiles into static HTML/CSS/JS assets. It is hosted on a Global CDN for optimal delivery performance.
 
 * **Target Hosting**: **Firebase Hosting** or **Google Cloud Storage (GCS) static site hosting**
@@ -154,16 +155,21 @@ The React frontend compiles into static HTML/CSS/JS assets. It is hosted on a Gl
 ---
 
 ### 2. Backend API Deployment (Google Compute Engine VM)
+
 The backend requires a runtime environment with access to a running Docker daemon to dynamically create and destroy sandbox containers. **Google Compute Engine (GCE)** or **Google Kubernetes Engine (GKE)** is required.
 
 #### Sibling Container Architecture (VM with Docker)
+
 Rather than executing slow nested Docker-in-Docker processes, the backend container runs side-by-side with its sandboxes:
+
 * **The GCE Host VM** runs the main Docker engine.
 * **The Backend API Container** mounts the host VM's Docker engine socket (`-v /var/run/docker.sock:/var/run/docker.sock`).
 * When an agent starts a reproduction run, it sends requests via the mounted socket to spin up a sandbox container (e.g., `bugrepro-sandbox-a1b2c3d4`) on the host VM directly.
 
 #### Deployment Steps:
+
 1. **Prepare Dockerfile** under `bugrepro-agent/`:
+
    ```dockerfile
    FROM python:3.11-slim
    RUN apt-get update && apt-get install -y docker.io curl && rm -rf /var/lib/apt/lists/*
@@ -175,14 +181,14 @@ Rather than executing slow nested Docker-in-Docker processes, the backend contai
    EXPOSE 8000
    CMD ["uv", "run", "uvicorn", "app.fast_api_app:app", "--host", "0.0.0.0", "--port", "8000"]
    ```
-
 2. **Build & Push to Artifact Registry using Cloud Build**:
+
    ```bash
    gcloud builds submit --tag us-central1-docker.pkg.dev/YOUR_PROJECT_ID/repro-registry/bugrepro-backend:latest ./bugrepro-agent
    ```
-
 3. **Configure & Launch the VM (GCE)**:
    Launch an instance running a standard Linux image with Docker installed:
+
    ```bash
    gcloud compute instances create bugrepro-backend-vm \
        --zone=us-central1-a \
@@ -192,9 +198,9 @@ Rather than executing slow nested Docker-in-Docker processes, the backend contai
        --metadata=startup-script="sudo apt-get update && sudo apt-get install -y docker.io" \
        --tags=http-server,https-server
    ```
-
 4. **Launch Backend Mounting Docker Socket**:
    SSH into your VM and run the container with host-socket mapping:
+
    ```bash
    docker run -d \
      --name sentinel-backend \
@@ -207,6 +213,7 @@ Rather than executing slow nested Docker-in-Docker processes, the backend contai
 ---
 
 ### 3. Automated Sandbox Container Cleanup & Fail-safes
+
 To prevent the GCE VM from accumulating orphaned sandbox containers and running out of disk space, BugRepro Sentinel implements a multi-tiered automated cleanup system:
 
 1. **Active Run Callback Teardown**: The ADK workflow registers a `sandbox_cleanup` callback in `agent.py`. When an execution finishes (whether it succeeds, fails, or runs into a timeout), the runner triggers `after_run_callback`, which locates the session's sandbox container, calls `sandbox.stop()`, and deletes it from the VM's Docker engine.
@@ -219,6 +226,7 @@ To prevent the GCE VM from accumulating orphaned sandbox containers and running 
 ---
 
 ### 4. Networking, DNS & SSL Configuration
+
 1. **Cloud Load Balancing**: Configure an HTTPS External Application Load Balancer to route traffic to the VM.
 2. **SSL Certificate**: Assign a custom domain (e.g., `api.bugrepro-sentinel.yourdomain.com`) with a Google-managed SSL certificate.
 3. **CORS**: Ensure `ALLOW_ORIGINS` on the backend VM matches the frontend domain to allow cross-origin browser requests.
