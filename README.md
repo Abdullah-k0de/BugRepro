@@ -1,6 +1,6 @@
 # BugRepro Sentinel: Verified AI Bug Fixing Agent
 
-BugRepro Sentinel is an autonomous DevSecOps agent system built on Google's **Agent Development Kit (ADK 2.0)**. Its objective is to help volunteer maintainers of public-good open-source Python projects by automatically triaging, reproducing, patching, and verifying bug fixes inside a secure, fully sandboxed Docker container (no host mounts).
+BugRepro Sentinel is an autonomous, language-agnostic DevSecOps agent system built on Google's **Agent Development Kit (ADK 2.0)**. Its objective is to help volunteer maintainers of public-good open-source software by automatically triaging, reproducing, patching, and verifying bug fixes across multiple language toolchains (supporting Python, Java, Rust, Go, Node.js, and C/C++) inside a secure, fully sandboxed Docker container (no host mounts).
 
 All operations (cloning, dependency installation, running command lines, writing files, and running test suites) run entirely within an isolated Docker container workspace with zero host filesystem mounts to ensure absolute isolation from untrusted repository code.
 
