@@ -126,7 +126,7 @@ reproduction_agent = Agent(
         "3. Run the test file using `run_sandbox_command` with the appropriate command for the language.\n"
         "   - IMPORTANT (COMPILED LANGUAGES): For compiled languages like Rust, Java, and C/C++, you MUST ensure "
         "     compilation happens before test execution. Use package-manager test commands (e.g., `['cargo', 'test']` "
-        "     or `['mvn', 'clean', 'test']`) which handle recompilation automatically, or write a shell script to run "
+        "     or `['mvn', '-ntp', 'clean', 'test']`) which handle recompilation automatically (ALWAYS use the `-ntp` or `--no-transfer-progress` flag when running Maven to prevent download progress bars from polluting the output), or write a shell script to run "
         "     both compilation and execution (e.g. `g++ -o suite math.cpp repro.cpp` followed by `./suite`) and execute it.\n"
         "4. Verify that you observe the expected assertion failure or crash (proving reproduction succeeded).\n"
         "5. Call `save_reproduction_results` with: \n"

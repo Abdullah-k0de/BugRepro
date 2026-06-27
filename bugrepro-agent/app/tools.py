@@ -437,10 +437,21 @@ def run_sandbox_command(command_args: list[str], tool_context: ToolContext) -> d
         return {"status": "error", "message": "No active sandbox. Call clone_and_setup_repo first."}
     
     res = sandbox.execute(sanitized_args)
+    
+    stdout = res.get("stdout", "")
+    # Filter out verbose download progress bars and URLs (e.g. from Maven, Gradle, pip)
+    # to prevent token bloat and LLM timeouts.
+    filtered_lines = []
+    for line in stdout.splitlines():
+        if "Progress (" in line or "Downloading from" in line or "Downloaded from" in line or "Downloading:" in line:
+            continue
+        filtered_lines.append(line)
+    clean_stdout = "\n".join(filtered_lines)
+
     return {
         "status": "success",
         "exit_code": res["exit_code"],
-        "stdout": res["stdout"]
+        "stdout": clean_stdout
     }
 
 
