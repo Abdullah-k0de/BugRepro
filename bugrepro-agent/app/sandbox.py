@@ -133,6 +133,10 @@ class DockerSandbox:
         parent_dir = os.path.dirname(container_path)
         if not parent_dir:
             parent_dir = self.workspace_dir
+        else:
+            # Ensure target parent directory exists inside the container before copying
+            self.execute(["mkdir", "-p", parent_dir], workdir="/")
+            
         self.container.put_archive(parent_dir, tar_stream.read())
 
     def read_file(self, container_path: str) -> str:
