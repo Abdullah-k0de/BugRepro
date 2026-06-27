@@ -54,7 +54,7 @@ def ensure_sandbox_image(client) -> str:
         if not os.path.exists(dockerfile_path):
             logger.info(f"Dockerfile.sandbox not found at '{dockerfile_path}'. Writing it dynamically...")
             dockerfile_content = (
-                "FROM ubuntu:22.04\n"
+                "FROM ubuntu:24.04\n"
                 "ENV DEBIAN_FRONTEND=noninteractive\n"
                 "RUN apt-get update && apt-get install -y \\\n"
                 "    curl \\\n"
@@ -76,7 +76,9 @@ def ensure_sandbox_image(client) -> str:
                 "    gradle \\\n"
                 "    rustc \\\n"
                 "    cargo \\\n"
+                "    && apt-get clean \\\n"
                 "    && rm -rf /var/lib/apt/lists/*\n"
+                "ENV MAVEN_OPTS=\"-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jTransferListener=warn\"\n"
                 "RUN ln -sf /usr/bin/python3 /usr/bin/python && \\\n"
                 "    ln -sf /usr/bin/pip3 /usr/bin/pip\n"
                 "WORKDIR /workspace\n"
